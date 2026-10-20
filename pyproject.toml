@@ -1,0 +1,23 @@
+[project]
+name = "intercompany_sync"
+authors = [
+    { name = "Rotiri Project", email = "rotiropi@users.noreply.github.com"}
+]
+description = "Intercompany transaction automation for JURI and outlets."
+requires-python = ">=3.14"
+readme = "README.md"
+dynamic = ["version"]
+dependencies = []
+
+[build-system]
+requires = ["flit_core >=3.4,<4"]
+build-backend = "flit_core.buildapi"
+
+[tool.ruff]
+line-length = 110
+target-version = "py314"
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "tab"
+docstring-code-format = true

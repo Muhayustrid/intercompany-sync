@@ -1,0 +1,18 @@
+[
+ {
+  "allow_on_submit": 1,
+  "default": null,
+  "docstatus": 0,
+  "doctype": "Custom Field",
+  "dt": "Payment Entry",
+  "fieldname": "ic_payment_reference",
+  "fieldtype": "Link",
+  "insert_after": "reference_date",
+  "label": "IC Payment Reference",
+  "module": "Intercompany Sync",
+  "name": "Payment Entry-ic_payment_reference",
+  "no_copy": 1,
+  "options": "Payment Entry",
+  "read_only": 1
+ }
+]
