@@ -14,6 +14,10 @@ fixtures = [
 	}
 ]
 
+doctype_js = {
+	"Sales Invoice": "public/js/sales_invoice.js",
+}
+
 doc_events = {
 	"Purchase Receipt": {
 		"validate": "intercompany_sync.guards.validate_purchase_receipt",
