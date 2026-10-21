@@ -111,6 +111,9 @@ def _setup_company(company_name: str, abbr: str) -> None:
 def setup_world() -> None:
 	"""Idempotent test world setup for inter-company sync."""
 	frappe.db.set_single_value("Stock Settings", "allow_negative_stock", 0)
+	if frappe.db.exists("DocType", "IC Sync Settings"):
+		frappe.db.set_single_value("IC Sync Settings", "disable_purchase_invoice_sync", 0)
+		frappe.db.set_single_value("IC Sync Settings", "disable_juri_payment_sync", 0)
 
 	if not frappe.db.exists("Warehouse Type", "Transit"):
 		frappe.get_doc(
@@ -284,6 +287,12 @@ def setup_world() -> None:
 				"companies": [{"company": SUPPLIER_CO}],
 			}
 		).insert()
+	else:
+		frappe.db.set_value(
+			"Customer",
+			INT_CUSTOMER,
+			{"is_internal_customer": 1, "represents_company": OUTLET_CO},
+		)
 
 	if not frappe.db.exists("Supplier", INT_SUPPLIER):
 		frappe.get_doc(
@@ -296,6 +305,12 @@ def setup_world() -> None:
 				"companies": [{"company": OUTLET_CO}],
 			}
 		).insert()
+	else:
+		frappe.db.set_value(
+			"Supplier",
+			INT_SUPPLIER,
+			{"is_internal_supplier": 1, "represents_company": SUPPLIER_CO},
+		)
 
 	# User
 	if not frappe.db.exists("User", OUTLET_USER):

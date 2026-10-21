@@ -34,6 +34,9 @@ def on_sales_invoice_submit(doc, method=None) -> None:
 	if doc.is_return or doc.is_pos:
 		return
 
+	if frappe.db.get_single_value("IC Sync Settings", "disable_purchase_invoice_sync"):
+		return
+
 	is_internal = doc.is_internal_customer or (
 		doc.customer and frappe.db.get_value("Customer", doc.customer, "is_internal_customer")
 	)
@@ -51,6 +54,9 @@ def on_sales_invoice_submit(doc, method=None) -> None:
 
 def create_purchase_invoice(si_name: str) -> str | None:
 	"""Create and submit counterpart Purchase Invoice for an internal Sales Invoice."""
+	if frappe.db.get_single_value("IC Sync Settings", "disable_purchase_invoice_sync"):
+		return None
+
 	if frappe.db.get_value("Sales Invoice", si_name, "docstatus") != 1:
 		return None
 
@@ -124,6 +130,9 @@ def on_payment_entry_submit(doc, method=None) -> None:
 	if doc.payment_type != "Pay" or doc.party_type != "Supplier":
 		return
 
+	if frappe.db.get_single_value("IC Sync Settings", "disable_juri_payment_sync"):
+		return
+
 	is_internal = doc.party and frappe.db.get_value("Supplier", doc.party, "is_internal_supplier")
 	if not is_internal:
 		return
@@ -155,6 +164,9 @@ def on_payment_entry_submit(doc, method=None) -> None:
 
 def create_juri_payment(pe_name: str) -> str | None:
 	"""Create draft counterpart Payment Entry in JURI for an outlet Payment Entry."""
+	if frappe.db.get_single_value("IC Sync Settings", "disable_juri_payment_sync"):
+		return None
+
 	if frappe.db.get_value("Payment Entry", pe_name, "docstatus") != 1:
 		return None
 

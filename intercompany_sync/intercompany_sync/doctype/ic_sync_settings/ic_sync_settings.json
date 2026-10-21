@@ -1,0 +1,47 @@
+{
+ "actions": [],
+ "creation": "2026-10-20 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "disable_purchase_invoice_sync",
+  "disable_juri_payment_sync"
+ ],
+ "fields": [
+  {
+   "default": "0",
+   "description": "Jika dicentang, Sales Invoice inter-company yang disubmit tidak akan membuat Purchase Invoice otomatis di outlet.",
+   "fieldname": "disable_purchase_invoice_sync",
+   "fieldtype": "Check",
+   "label": "Nonaktifkan Sync Purchase Invoice"
+  },
+  {
+   "default": "0",
+   "description": "Jika dicentang, Payment Entry outlet yang disubmit tidak akan membuat draft Payment Entry di JURI.",
+   "fieldname": "disable_juri_payment_sync",
+   "fieldtype": "Check",
+   "label": "Nonaktifkan Sync Pembayaran JURI"
+  }
+ ],
+ "issingle": 1,
+ "links": [],
+ "modified": "2026-10-20 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Intercompany Sync",
+ "name": "IC Sync Settings",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "read": 1,
+   "role": "System Manager",
+   "write": 1
+  },
+  {
+   "create": 1,
+   "read": 1,
+   "role": "Accounts Manager",
+   "write": 1
+  }
+ ]
+}

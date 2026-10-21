@@ -1,5 +1,6 @@
 import frappe
 from frappe import _
+from frappe.utils import flt
 
 
 def _add_ignore_linked_doctype(doc, target_doctype: str) -> None:
@@ -16,50 +17,51 @@ def _add_ignore_linked_doctype(doc, target_doctype: str) -> None:
 
 
 def before_cancel_sales_invoice(doc, method=None) -> None:
-	"""Cascade cancellation to counterpart Purchase Invoice or block if already paid."""
-	if doc.is_return:
-		return
-
-	is_internal = doc.is_internal_customer or (
-		doc.customer and frappe.db.get_value("Customer", doc.customer, "is_internal_customer")
-	)
-	if not is_internal:
-		return
-
-	pi_name = frappe.db.get_value(
-		"Purchase Invoice",
-		{"inter_company_invoice_reference": doc.name, "docstatus": ("<", 2)},
-		"name",
-	)
-	if (
-		not pi_name
-		and doc.inter_company_invoice_reference
-		and frappe.db.exists(
+	"""Cascade cancellation to counterpart Purchase Invoices or block if already paid."""
+	pi_names = set(
+		frappe.get_all(
 			"Purchase Invoice",
-			{"name": doc.inter_company_invoice_reference, "docstatus": ("<", 2)},
+			filters={"inter_company_invoice_reference": doc.name, "docstatus": ("<", 2)},
+			pluck="name",
 		)
+	)
+	if doc.inter_company_invoice_reference and frappe.db.exists(
+		"Purchase Invoice",
+		{"name": doc.inter_company_invoice_reference, "docstatus": ("<", 2)},
 	):
-		pi_name = doc.inter_company_invoice_reference
+		pi_names.add(doc.inter_company_invoice_reference)
 
-	if not pi_name:
+	if not pi_names:
 		return
 
-	pi_doc = frappe.get_doc("Purchase Invoice", pi_name)
-	if float(pi_doc.outstanding_amount or 0.0) < float(pi_doc.grand_total or 0.0):
-		frappe.throw(
-			_("Purchase Invoice {0} sudah dibayar. Batalkan pembayarannya dulu.").format(pi_name),
-			title=_("Purchase Invoice Sudah Dibayar"),
-		)
+	pi_docs = [frappe.get_doc("Purchase Invoice", name) for name in sorted(pi_names)]
+	for pi_doc in pi_docs:
+		# Outstanding starts at rounded_total (if rounding is on); abs() keeps returns (negative totals) right.
+		invoice_total = flt(pi_doc.rounded_total) or flt(pi_doc.grand_total)
+		if pi_doc.docstatus == 1 and abs(flt(pi_doc.outstanding_amount) - invoice_total) > 0.01:
+			frappe.throw(
+				_("Purchase Invoice {0} sudah dibayar. Batalkan pembayarannya dulu.").format(pi_doc.name),
+				title=_("Purchase Invoice Sudah Dibayar"),
+			)
 
 	orig_user = frappe.session.user
+	# All-or-nothing: a failure on a later PI must not leave earlier ones cancelled.
+	frappe.db.savepoint("ic_si_cancel_cascade")
 	try:
 		frappe.set_user("Administrator")
-		if pi_doc.docstatus == 1:
-			pi_doc.flags.ignore_permissions = True
-			pi_doc.flags.ic_cascade = True
-			pi_doc.cancel()
-		elif pi_doc.docstatus == 0:
-			frappe.delete_doc("Purchase Invoice", pi_doc.name, force=1, ignore_permissions=True)
+		for pi_doc in pi_docs:
+			if pi_doc.docstatus == 1:
+				pi_doc.flags.ignore_permissions = True
+				pi_doc.flags.ic_cascade = True
+				pi_doc.cancel()
+			elif pi_doc.docstatus == 0:
+				# No force: other docs linking the draft must block; unlink this SI first so it does not.
+				if doc.inter_company_invoice_reference == pi_doc.name:
+					frappe.db.set_value("Sales Invoice", doc.name, "inter_company_invoice_reference", None)
+				frappe.delete_doc("Purchase Invoice", pi_doc.name, ignore_permissions=True)
+	except Exception:
+		frappe.db.rollback(save_point="ic_si_cancel_cascade")
+		raise
 	finally:
 		frappe.set_user(orig_user)
 
