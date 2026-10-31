@@ -4,6 +4,7 @@ Runnable without Frappe on the host using lightweight dependency boundary stubs.
 Restores sys.modules on teardown to prevent side effects.
 """
 
+import json
 import sys
 import unittest
 from types import ModuleType
@@ -212,6 +213,8 @@ def _setup_fake_frappe():
 			pass
 
 	fake_frappe.FakeDB = FakeDB
+	fake_frappe.flags = FakeFrappeDict()
+	fake_frappe.parse_json = lambda val: json.loads(val) if isinstance(val, str) else val
 	fake_frappe.db = FakeDB()
 	fake_frappe.get_all = lambda doctype, **kwargs: fake_frappe.db.get_all(doctype, **kwargs)
 	fake_frappe.get_list = lambda doctype, **kwargs: fake_frappe.db.get_list(doctype, **kwargs)
@@ -547,48 +550,42 @@ class TestMappingContracts(unittest.TestCase):
 		with self.assertRaises(frappe.ValidationError):
 			self.mapping.make_sales_order("PO-PAIRED")
 
-	def test_make_sales_order_rejected_if_target_has_items(self):
+	def test_make_sales_order_replaces_existing_items_and_source_link(self):
+		"""Like native Get Items, mapping into a filled target replaces its rows and previous source link."""
 		po = FakeDoc(
 			{
 				"doctype": "Purchase Order",
-				"name": "PO-2026-003",
+				"name": "PO-REPLACE",
 				"docstatus": 1,
-				"is_return": 0,
 				"company": "Outlet Company",
 				"supplier": "JURI Supplier",
+				"items": [FakeDoc({"name": "POI-R", "item_code": "ITEM-1", "qty": 10})],
 			}
 		)
 		frappe._docs_store[("Purchase Order", po.name)] = po
-		target_doc = FakeDoc(
+		frappe.db.get_value = lambda dt, f, fn=None, as_dict=False: "JURI Company" if dt == "Supplier" else None
+		target = FakeDoc(
 			{
 				"doctype": "Sales Order",
-				"items": [FakeDoc({"item_code": "EXISTING"})],
+				"inter_company_order_reference": "PO-OLD",
+				"items": [FakeDoc({"item_code": "OLD-ITEM", "qty": 3})],
 			}
 		)
-		with self.assertRaises(frappe.ValidationError):
-			self.mapping.make_sales_order("PO-2026-003", target_doc=target_doc)
+		seen = {}
 
-	def test_make_sales_order_rejected_if_mixing_source(self):
-		po = FakeDoc(
-			{
-				"doctype": "Purchase Order",
-				"name": "PO-2026-004",
-				"docstatus": 1,
-				"is_return": 0,
-				"company": "Outlet Company",
-				"supplier": "JURI Supplier",
-			}
-		)
-		frappe._docs_store[("Purchase Order", po.name)] = po
-		target_doc = FakeDoc(
-			{
-				"doctype": "Sales Order",
-				"inter_company_order_reference": "PO-OTHER",
-				"items": [],
-			}
-		)
-		with self.assertRaises(frappe.ValidationError):
-			self.mapping.make_sales_order("PO-2026-004", target_doc=target_doc)
+		def fake_native_so(source_name, target_doc=None):
+			seen["items"] = list(target_doc.items)
+			seen["ref"] = target_doc.inter_company_order_reference
+			target_doc.items = [FakeDoc({"item_code": "ITEM-1", "qty": 10, "purchase_order_item": "POI-R"})]
+			return target_doc
+
+		native_make_sales_order.side_effect = fake_native_so
+		so = self.mapping.make_sales_order("PO-REPLACE", target_doc=target)
+
+		self.assertEqual(seen, {"items": [], "ref": None}, "old rows and link must be cleared before mapping")
+		self.assertEqual([i.item_code for i in so.items], ["ITEM-1"])
+		self.assertEqual(so.inter_company_order_reference, "PO-REPLACE")
+		self.assertEqual(so.ignore_pricing_rule, 1, "selling promos must not add free items to an IC order")
 
 	def test_make_sales_order_permission_denied(self):
 		po = FakeDoc(
@@ -1136,48 +1133,6 @@ class TestMappingContracts(unittest.TestCase):
 		self.assertEqual(out["DNI-BOX-1"]["stock_qty"], 70.0)
 		self.assertEqual(out["DNI-BOX-1"]["qty"], 7.0)
 
-	def test_make_purchase_receipt_rejected_if_target_has_items(self):
-		dn = FakeDoc(
-			{
-				"doctype": "Delivery Note",
-				"name": "DN-OCCUPIED",
-				"docstatus": 1,
-				"is_return": 0,
-				"items": [FakeDoc({"name": "DNI-OCC", "qty": 10, "stock_qty": 10})],
-			}
-		)
-		frappe._docs_store[("Delivery Note", dn.name)] = dn
-		target_doc = FakeDoc(
-			{
-				"doctype": "Purchase Receipt",
-				"items": [FakeDoc({"item_code": "EXISTING"})],
-			}
-		)
-		with self.assertRaises(frappe.ValidationError):
-			self.mapping.make_purchase_receipt("DN-OCCUPIED", target_doc=target_doc)
-
-	def test_make_purchase_receipt_rejected_if_mixing_source(self):
-		dn = FakeDoc(
-			{
-				"doctype": "Delivery Note",
-				"name": "DN-MIX-1",
-				"docstatus": 1,
-				"is_return": 0,
-				"items": [FakeDoc({"name": "DNI-M1", "qty": 10, "stock_qty": 10})],
-			}
-		)
-		frappe._docs_store[("Delivery Note", dn.name)] = dn
-		target_doc = FakeDoc(
-			{
-				"doctype": "Purchase Receipt",
-				"inter_company_reference": "DN-OTHER",
-				"items": [],
-			}
-		)
-		with self.assertRaises(frappe.ValidationError):
-			self.mapping.make_purchase_receipt("DN-MIX-1", target_doc=target_doc)
-
-
 	def test_make_sales_order_rejected_if_target_mismatched_company(self):
 		po = FakeDoc(
 			{
@@ -1655,6 +1610,59 @@ class TestMappingContracts(unittest.TestCase):
 				fieldnames = [c[0] for c in f]
 				self.assertNotIn("is_return", fieldnames, "PO query must not filter is_return")
 
+	def test_get_sources_mutes_native_resolver_messages_for_skipped_documents(self):
+		"""A PO whose company lacks an internal customer is skipped silently, without a leaked msgprint."""
+		pos = [
+			FakeDoc({"name": "PO-NO-CUSTOMER", "company": "Outlet Without Customer", "supplier": "JURI Supp"}),
+			FakeDoc({"name": "PO-OK", "company": "Outlet Co", "supplier": "JURI Supp"}),
+		]
+		frappe.get_list = lambda dt, **k: pos[k.get("start", 0) :] if dt == "Purchase Order" else []
+		frappe.db.get_all = lambda dt, **k: []
+		mute_states = []
+
+		def fake_resolver(doc, doctype):
+			mute_states.append(frappe.flags.mute_messages)
+			if doc.name == "PO-NO-CUSTOMER":
+				if not frappe.flags.mute_messages:
+					frappe.msgprint("No Customer found for Inter Company Transactions")
+				raise frappe.ValidationError("No Customer found for Inter Company Transactions")
+			return {"company": "JURI Co", "party": "Outlet Customer"}
+
+		sys.modules["erpnext.accounts.doctype.sales_invoice.sales_invoice"].get_inter_company_details = fake_resolver
+		frappe.msgprint = MagicMock()
+		frappe.flags.mute_messages = None
+
+		res = self.mapping.get_sources(source_doctype="Purchase Order", target_company="JURI Co")
+
+		self.assertEqual([r["name"] for r in res], ["PO-OK"])
+		self.assertEqual(mute_states, [True, True])
+		frappe.msgprint.assert_not_called()
+		self.assertIsNone(frappe.flags.mute_messages, "mute flag must be restored")
+
+	def test_search_sources_maps_dialog_filters_to_get_sources(self):
+		"""search_sources follows the search_widget query contract and forwards extra list filters."""
+		captured = {}
+
+		def fake_get_list(dt, **k):
+			captured["filters"] = k.get("filters")
+			return []
+
+		frappe.get_list = fake_get_list
+		frappe.db.get_all = lambda dt, **k: []
+
+		res = self.mapping.search_sources(
+			"Delivery Note",
+			"DN-JURI",
+			"name",
+			0,
+			20,
+			json.dumps({"target_company": "Outlet Co", "target_party": "JURI Supp", "customer": "Outlet Customer", "posting_date": ["<=", "2026-10-31"]}),
+		)
+		self.assertEqual(res, [])
+		self.assertIn(["customer", "=", "Outlet Customer"], captured["filters"])
+		self.assertIn(["posting_date", "<=", "2026-10-31"], captured["filters"])
+		self.assertEqual(self.mapping.search_sources("Delivery Note", "", "name", 0, 20, {}), [])
+
 	def test_make_purchase_receipt_fails_closed_on_external_supplier(self):
 		"""Finding 4: external supplier lacking represents_company must be rejected."""
 		dn = FakeDoc(
@@ -2001,45 +2009,6 @@ class TestMappingContracts(unittest.TestCase):
 		self.assertTrue(len(msg_calls) > 0, "Warning to refine search must be emitted when 500 cap is reached")
 		self.assertTrue(any("500" in str(m) for m in msg_calls))
 
-
-	def test_validate_target_doc_rejects_occupied_persisted_draft_even_if_payload_items_empty(self):
-		"""Fix 1 (round 3): reject target if persisted draft in DB has items, even if payload.items is empty."""
-		po = FakeDoc(
-			{
-				"doctype": "Purchase Order",
-				"name": "PO-PERSISTED-ITEMS",
-				"docstatus": 1,
-				"company": "Outlet Company",
-				"supplier": "JURI Supplier",
-				"items": [FakeDoc({"name": "POI-PI", "item_code": "ITEM-1", "qty": 10})],
-			}
-		)
-		frappe._docs_store[("Purchase Order", po.name)] = po
-
-		# In DB, SO-PERSISTED-1 has items already
-		persisted_so = FakeDoc(
-			{
-				"doctype": "Sales Order",
-				"name": "SO-PERSISTED-1",
-				"docstatus": 0,
-				"company": "JURI Company",
-				"items": [FakeDoc({"item_code": "ALREADY-HERE", "qty": 5})],
-			}
-		)
-		frappe._docs_store[("Sales Order", "SO-PERSISTED-1")] = persisted_so
-		frappe.db.exists = lambda dt, name: (dt == "Sales Order" and name == "SO-PERSISTED-1")
-
-		# Client sends target with empty items list
-		payload_target = FakeDoc(
-			{
-				"doctype": "Sales Order",
-				"name": "SO-PERSISTED-1",
-				"company": "JURI Company",
-				"items": [],
-			}
-		)
-		with self.assertRaises(frappe.ValidationError):
-			self.mapping.make_sales_order("PO-PERSISTED-ITEMS", target_doc=payload_target)
 
 	def test_make_sales_order_captures_supplied_party_before_mapper_mutates_target(self):
 		"""Fix 2 (round 3): capture supplied target.customer scalar before native mapper mutates target_doc."""

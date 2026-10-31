@@ -267,7 +267,7 @@ def validate_purchase_receipt(doc, method=None) -> None:
 		)
 
 	dn_name = doc.inter_company_reference
-	if not frappe.has_permission("Delivery Note", "read", doc=dn_name, print_logs=False):
+	if not frappe.has_permission("Delivery Note", "read", doc=dn_name):
 		raise frappe.PermissionError(
 			_("Anda tidak memiliki izin membaca Delivery Note referensi.")
 		)
@@ -304,7 +304,7 @@ def before_submit_purchase_receipt(doc, method=None) -> None:
 			title=_("Referensi Inter-company Kurang"),
 		)
 
-	if not frappe.has_permission("Delivery Note", "read", doc=dn_name, print_logs=False):
+	if not frappe.has_permission("Delivery Note", "read", doc=dn_name):
 		raise frappe.PermissionError(
 			_("Anda tidak memiliki izin membaca Delivery Note referensi.")
 		)

@@ -148,7 +148,7 @@ def _setup_fake_frappe():
 		lambda doctype, name, fieldname: fake_frappe.db.get_cached_value(doctype, name, fieldname)
 	)
 
-	def has_permission(doctype, ptype="read", doc=None, user=None, throw=False, print_logs=True):
+	def has_permission(doctype, ptype="read", doc=None, user=None, throw=False):
 		return True
 
 	fake_frappe.has_permission = has_permission
@@ -939,18 +939,18 @@ class TestPartialReceiptGuards(unittest.TestCase):
 		original_has_perm = frappe.has_permission
 		captured_calls = []
 
-		def restricted_has_perm(doctype, ptype="read", doc=None, user=None, throw=False, print_logs=True):
+		# Mirror the real frappe.has_permission signature: it has no print_logs kwarg
+		def restricted_has_perm(doctype, ptype="read", doc=None, user=None, throw=False):
 			captured_calls.append({
 				"doctype": doctype,
 				"ptype": ptype,
 				"doc": doc,
-				"print_logs": print_logs,
 			})
 			if doctype == "Delivery Note" and ptype == "read" and doc == "DN-CONFIDENTIAL":
-				if print_logs:
+				if throw:
 					frappe.msgprint(f"No read permission for {doctype} {doc}")
 				return False
-			return original_has_perm(doctype, ptype, doc=doc, user=user, throw=throw, print_logs=print_logs)
+			return original_has_perm(doctype, ptype, doc=doc, user=user, throw=throw)
 
 		frappe.has_permission = restricted_has_perm
 		try:
@@ -964,7 +964,6 @@ class TestPartialReceiptGuards(unittest.TestCase):
 			self.assertNotIn(self.supplier_company, err_msg)
 			self.assertNotIn(self.item_code, err_msg)
 			self.assertEqual(len(captured_calls), 1)
-			self.assertIs(captured_calls[0]["print_logs"], False, "validate_purchase_receipt must pass print_logs=False")
 			frappe.msgprint.assert_not_called()
 
 			# 2. before_submit_purchase_receipt must raise PermissionError without reading/locking
@@ -978,7 +977,6 @@ class TestPartialReceiptGuards(unittest.TestCase):
 			self.assertNotIn(self.supplier_company, err_msg_submit)
 			self.assertNotIn(self.item_code, err_msg_submit)
 			self.assertEqual(len(captured_calls), 1)
-			self.assertIs(captured_calls[0]["print_logs"], False, "before_submit_purchase_receipt must pass print_logs=False")
 			frappe.msgprint.assert_not_called()
 		finally:
 			frappe.has_permission = original_has_perm

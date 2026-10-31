@@ -161,6 +161,16 @@ function createFrappeEnvironment() {
 					handlers[doctype] = handlers[doctype] || [];
 					handlers[doctype].push(event_handlers);
 				},
+				MultiSelectDialog: function (opts) {
+					const picker = {
+						opts,
+						is_shown: true,
+						select: (names) => opts.action(names, {}),
+					};
+					picker.dialog = { hide: () => (picker.is_shown = false) };
+					lastDialog = picker;
+					return picker;
+				},
 			},
 			Dialog: function (opts) {
 				const d = new DialogStub(opts);
@@ -396,7 +406,7 @@ test("Delivery Note: no button if draft, not internal customer, or cannot create
 	assert.equal(frmNoPerm.page.inner_buttons["Create"], undefined);
 });
 
-test("Picker dialog: queries get_sources with target filters and text search", () => {
+test("Picker dialog: native MultiSelectDialog queries search_sources with target company and party", () => {
 	const ctx = createFrappeEnvironment();
 	loadScriptInVm(ctx);
 
@@ -412,29 +422,21 @@ test("Picker dialog: queries get_sources with target filters and text search", (
 	);
 	btn.action();
 
-	const dialog = ctx.getLastDialog();
-	assert.ok(dialog, "Dialog should be created and shown");
-	assert.ok(dialog.is_shown);
-
-	// Check get_sources RPC call
-	const call = ctx.calls.find(
-		(c) => c.method === "intercompany_sync.mapping.get_sources"
+	const picker = ctx.getLastDialog();
+	assert.ok(picker, "MultiSelectDialog should be created");
+	assert.equal(picker.opts.doctype, "Purchase Order");
+	assert.equal(picker.opts.add_filters_group, 1);
+	assert.deepEqual(
+		Array.from(picker.opts.setters, (s) => s.fieldname),
+		["company", "transaction_date"]
 	);
-	assert.ok(call, "get_sources RPC should be dispatched");
-	assert.equal(call.args.source_doctype, "Purchase Order");
-	assert.equal(call.args.target_company, "Company B");
-	assert.equal(call.args.target_party, "Cust-A");
-	assert.equal(call.args.txt, "");
-
-	// Simulate text search in dialog
-	dialog.set_value("search_text", "PO-2026");
-	const searchCall = ctx.calls.filter(
-		(c) => c.method === "intercompany_sync.mapping.get_sources"
-	).pop();
-	assert.equal(searchCall.args.txt, "PO-2026");
+	const query = picker.opts.get_query();
+	assert.equal(query.query, "intercompany_sync.mapping.search_sources");
+	assert.equal(query.filters.target_company, "Company B");
+	assert.equal(query.filters.target_party, "Cust-A");
 });
 
-test("Picker dialog: handles empty and error states with retry, and async stale guard", () => {
+test("Picker dialog: Purchase Receipt uses Delivery Note source with posting_date setter and supplier party", () => {
 	const ctx = createFrappeEnvironment();
 	loadScriptInVm(ctx);
 
@@ -446,42 +448,44 @@ test("Picker dialog: handles empty and error states with retry, and async stale 
 
 	triggerEvent(ctx, "Purchase Receipt", "refresh", frm);
 	frm.page.inner_buttons["Get Items From"][0].action();
-	const dialog = ctx.getLastDialog();
+	const picker = ctx.getLastDialog();
 
-	// 1. Simulate empty result
-	const fetchCall1 = ctx.calls.filter((c) => c.method === "intercompany_sync.mapping.get_sources")[0];
-	fetchCall1.callback({ message: [] });
-	assert.match(dialog.status_html, /tidak ada/i, "Empty state should show clear message");
-
-	// 2. Simulate error result
-	fetchCall1.callback({ exc: "Error connecting" });
-	assert.match(dialog.status_html, /gagal/i, "Error state should show failure message");
-	assert.ok(dialog.retry_action, "Retry callback should be available");
-
-	// 3. Async stale guard: earlier request completing after later request must not overwrite
-	let cb1, cb2;
-	ctx.calls.length = 0;
-	dialog.set_value("search_text", "first");
-	cb1 = ctx.calls[ctx.calls.length - 1].callback;
-
-	dialog.set_value("search_text", "second");
-	cb2 = ctx.calls[ctx.calls.length - 1].callback;
-
-	// Request 2 completes first
-	cb2({
-		message: [{ name: "DN-002", company: "Company A" }],
-	});
-	assert.equal(dialog.fields_dict.source_name.df.options.some((o) => o.value === "DN-002"), true);
-
-	// Request 1 completes later (stale)
-	cb1({
-		message: [{ name: "DN-001", company: "Company A" }],
-	});
-	// DN-001 must not overwrite DN-002
-	assert.equal(dialog.fields_dict.source_name.df.options.some((o) => o.value === "DN-001"), false);
+	assert.equal(picker.opts.doctype, "Delivery Note");
+	assert.deepEqual(
+		Array.from(picker.opts.setters, (s) => s.fieldname),
+		["company", "posting_date"]
+	);
+	assert.equal(picker.opts.get_query().filters.target_party, "Supp-A");
 });
 
-test("Target document safety: placeholder pruned in cloned payload, original draft preserved", () => {
+test("Picker dialog: requires exactly one selected source and never maps several", () => {
+	const ctx = createFrappeEnvironment();
+	loadScriptInVm(ctx);
+
+	const frm = new ctx.FormStub("Purchase Receipt", {
+		docstatus: 0,
+		company: "Company B",
+		supplier: "Supp-A",
+	});
+
+	triggerEvent(ctx, "Purchase Receipt", "refresh", frm);
+	frm.page.inner_buttons["Get Items From"][0].action();
+	const picker = ctx.getLastDialog();
+
+	picker.select([]);
+	picker.select(["DN-001", "DN-002"]);
+	assert.equal(
+		ctx.calls.filter((c) => c.method === "intercompany_sync.mapping.make_purchase_receipt").length,
+		0
+	);
+	assert.equal(ctx.messages.length, 2);
+
+	picker.select(["DN-001"]);
+	const mapCall = ctx.calls.find((c) => c.method === "intercompany_sync.mapping.make_purchase_receipt");
+	assert.equal(mapCall.args.source_name, "DN-001");
+});
+
+test("Get Items replaces a filled item table like native, without touching the form before the response", () => {
 	const ctx = createFrappeEnvironment();
 	loadScriptInVm(ctx);
 
@@ -490,59 +494,21 @@ test("Target document safety: placeholder pruned in cloned payload, original dra
 		name: "new-sales-order-1",
 		company: "Company B",
 		customer: "Cust-A",
-		// Single blank placeholder row in fresh form
-		items: [{ doctype: "Sales Order Item", name: "row-1", item_code: "", qty: 0 }],
+		items: [{ doctype: "Sales Order Item", name: "row-1", item_code: "ROTI-001", qty: 5 }],
 	});
 
 	triggerEvent(ctx, "Sales Order", "refresh", frm);
 	frm.page.inner_buttons["Get Items From"][0].action();
-	const dialog = ctx.getLastDialog();
+	ctx.getLastDialog().select(["PUR-ORD-2026-00001"]);
 
-	// Select source and submit
-	dialog.set_value("source_name", "PUR-ORD-2026-00001");
-	dialog.submit_primary();
+	assert.equal(ctx.messages.length, 0, "A filled table must not be rejected");
+	assert.equal(frm.doc.items[0].item_code, "ROTI-001", "Form untouched until the server responds");
 
-	// Verify original frm.doc was NOT mutated before success
-	assert.equal(frm.doc.items.length, 1);
-	assert.equal(frm.doc.items[0].name, "row-1");
-
-	// Check mapping RPC call
 	const mapCall = ctx.calls.find((c) => c.method === "intercompany_sync.mapping.make_sales_order");
-	assert.ok(mapCall, "Mapping RPC make_sales_order must be called");
-	assert.equal(mapCall.args.source_name, "PUR-ORD-2026-00001");
-
 	const targetPayload = JSON.parse(mapCall.args.target_doc);
 	assert.equal(targetPayload.name, "new-sales-order-1");
-	assert.equal(targetPayload.__islocal, 1);
-	assert.equal(targetPayload.company, "Company B");
 	assert.equal(targetPayload.customer, "Cust-A");
-	// Blank placeholder was pruned in the cloned payload
-	assert.equal(targetPayload.items.length, 0);
-});
-
-test("Target document safety: occupied target rejected without mutation or RPC", () => {
-	const ctx = createFrappeEnvironment();
-	loadScriptInVm(ctx);
-
-	const frm = new ctx.FormStub("Sales Order", {
-		docstatus: 0,
-		company: "Company B",
-		customer: "Cust-A",
-		// Occupied target: contains a real item
-		items: [{ doctype: "Sales Order Item", item_code: "ROTI-001", qty: 5 }],
-	});
-
-	triggerEvent(ctx, "Sales Order", "refresh", frm);
-	frm.page.inner_buttons["Get Items From"][0].action();
-
-	const mapCalls = ctx.calls.filter((c) => c.method?.includes("make_sales_order"));
-	assert.equal(mapCalls.length, 0, "Must not dispatch RPC when target is occupied");
-	assert.equal(frm.doc.items.length, 1, "Original items must remain untouched");
-	assert.equal(frm.doc.items[0].item_code, "ROTI-001");
-	assert.ok(
-		ctx.messages.some((m) => (typeof m === "string" ? m : m.message).match(/sudah berisi item/i)),
-		"User must receive notification that target is already occupied"
-	);
+	assert.equal(targetPayload.items.length, 0, "Existing rows are dropped so the mapped rows replace them");
 });
 
 test("Async stale guard: aborts applying mapped document if target company/party/name changed", () => {
@@ -561,8 +527,7 @@ test("Async stale guard: aborts applying mapped document if target company/party
 	frm.page.inner_buttons["Get Items From"][0].action();
 	const dialog = ctx.getLastDialog();
 
-	dialog.set_value("source_name", "PUR-ORD-2026-00001");
-	dialog.submit_primary();
+	dialog.select(["PUR-ORD-2026-00001"]);
 
 	const mapCall = ctx.calls.find((c) => c.method === "intercompany_sync.mapping.make_sales_order");
 	assert.ok(mapCall);
@@ -601,8 +566,7 @@ test("Mapping creates draft only: syncs locals, marks dirty and refreshed, never
 	frm.page.inner_buttons["Get Items From"][0].action();
 	const dialog = ctx.getLastDialog();
 
-	dialog.set_value("source_name", "PUR-ORD-2026-00001");
-	dialog.submit_primary();
+	dialog.select(["PUR-ORD-2026-00001"]);
 
 	const mapCall = ctx.calls.find((c) => c.method === "intercompany_sync.mapping.make_sales_order");
 	const mappedDoc = {
@@ -642,8 +606,7 @@ test("Async stale guard: aborts applying mapped document if header fields (date/
 	frm.page.inner_buttons["Get Items From"][0].action();
 	const dialog = ctx.getLastDialog();
 
-	dialog.set_value("source_name", "PUR-ORD-2026-00001");
-	dialog.submit_primary();
+	dialog.select(["PUR-ORD-2026-00001"]);
 
 	const mapCall = ctx.calls.find((c) => c.method === "intercompany_sync.mapping.make_sales_order");
 	assert.ok(mapCall);
@@ -684,8 +647,7 @@ test("Async stale guard: aborts applying mapped document if items child table ch
 	frm.page.inner_buttons["Get Items From"][0].action();
 	const dialog = ctx.getLastDialog();
 
-	dialog.set_value("source_name", "PUR-ORD-2026-00001");
-	dialog.submit_primary();
+	dialog.select(["PUR-ORD-2026-00001"]);
 
 	const mapCall = ctx.calls.find((c) => c.method === "intercompany_sync.mapping.make_sales_order");
 	assert.ok(mapCall);
@@ -708,112 +670,6 @@ test("Async stale guard: aborts applying mapped document if items child table ch
 	assert.equal(frm.is_dirty, false);
 	assert.equal(frm.doc.items.length, 1, "Delayed item addition must be preserved");
 	assert.equal(frm.doc.items[0].item_code, "ROTI-999");
-});
-
-test("Target safety: rejects target with non-default qty in single row without item_code without mutation or RPC", () => {
-	const ctx = createFrappeEnvironment();
-	loadScriptInVm(ctx);
-
-	const frm = new ctx.FormStub("Sales Order", {
-		docstatus: 0,
-		company: "Company B",
-		customer: "Cust-A",
-		// User typed qty: 5 on the row before setting item_code
-		items: [{ doctype: "Sales Order Item", item_code: "", qty: 5 }],
-	});
-
-	triggerEvent(ctx, "Sales Order", "refresh", frm);
-	frm.page.inner_buttons["Get Items From"][0].action();
-
-	const dialog = ctx.getLastDialog();
-	assert.equal(dialog, null, "Dialog must not even open when target has user qty edit");
-
-	const mapCalls = ctx.calls.filter((c) => c.method?.includes("make_sales_order"));
-	assert.equal(mapCalls.length, 0, "Must not dispatch RPC when row has user qty edit");
-	assert.equal(frm.doc.items.length, 1);
-	assert.equal(frm.doc.items[0].qty, 5, "User qty edit must be retained untouched");
-	assert.ok(
-		ctx.messages.some((m) => (typeof m === "string" ? m : m.message).match(/sudah berisi item/i)),
-		"User must receive notification that target is already occupied"
-	);
-});
-
-test("Target safety: rejects target with warehouse set in single row without item_code without mutation or RPC", () => {
-	const ctx = createFrappeEnvironment();
-	loadScriptInVm(ctx);
-
-	const frm = new ctx.FormStub("Sales Order", {
-		docstatus: 0,
-		company: "Company B",
-		customer: "Cust-A",
-		// User selected warehouse on the row before setting item_code
-		items: [{ doctype: "Sales Order Item", item_code: "", warehouse: "Stores - B" }],
-	});
-
-	triggerEvent(ctx, "Sales Order", "refresh", frm);
-	frm.page.inner_buttons["Get Items From"][0].action();
-
-	const dialog = ctx.getLastDialog();
-	assert.equal(dialog, null, "Dialog must not even open when target has user warehouse edit");
-
-	const mapCalls = ctx.calls.filter((c) => c.method?.includes("make_sales_order"));
-	assert.equal(mapCalls.length, 0, "Must not dispatch RPC when row has warehouse edit");
-	assert.equal(frm.doc.items.length, 1);
-	assert.equal(frm.doc.items[0].warehouse, "Stores - B", "User warehouse must be retained untouched");
-	assert.ok(
-		ctx.messages.some((m) => (typeof m === "string" ? m : m.message).match(/sudah berisi item/i)),
-		"User must receive notification that target is already occupied"
-	);
-});
-
-test("Target safety: accepts virgin placeholder with default blank native qty 1 and no user edits", () => {
-	const ctx = createFrappeEnvironment();
-	loadScriptInVm(ctx);
-
-	const frm = new ctx.FormStub("Sales Order", {
-		docstatus: 0,
-		name: "new-sales-order-1",
-		company: "Company B",
-		customer: "Cust-A",
-		// Default virgin placeholder with qty: 1 and no warehouse or user edits
-		items: [{ doctype: "Sales Order Item", name: "row-1", item_code: "", qty: 1 }],
-	});
-
-	triggerEvent(ctx, "Sales Order", "refresh", frm);
-	frm.page.inner_buttons["Get Items From"][0].action();
-	const dialog = ctx.getLastDialog();
-
-	dialog.set_value("source_name", "PUR-ORD-2026-00001");
-	dialog.submit_primary();
-
-	const mapCall = ctx.calls.find((c) => c.method === "intercompany_sync.mapping.make_sales_order");
-	assert.ok(mapCall, "Virgin placeholder with qty 1 should be accepted and pruned");
-	const targetPayload = JSON.parse(mapCall.args.target_doc);
-	assert.equal(targetPayload.items.length, 0, "Virgin placeholder pruned in payload");
-	assert.equal(frm.doc.items.length, 1, "Original doc untouched before RPC response");
-});
-
-test("Target safety: rejects single row with qty 1 when __unedited is false (user edited row)", () => {
-	const ctx = createFrappeEnvironment();
-	loadScriptInVm(ctx);
-
-	const frm = new ctx.FormStub("Sales Order", {
-		docstatus: 0,
-		company: "Company B",
-		customer: "Cust-A",
-		// Row where user actively set a field, unsetting __unedited
-		items: [{ doctype: "Sales Order Item", item_code: "", qty: 1, __unedited: false }],
-	});
-
-	triggerEvent(ctx, "Sales Order", "refresh", frm);
-	frm.page.inner_buttons["Get Items From"][0].action();
-
-	const dialog = ctx.getLastDialog();
-	assert.equal(dialog, null, "Dialog must not even open when row has __unedited=false");
-
-	const mapCalls = ctx.calls.filter((c) => c.method?.includes("make_sales_order"));
-	assert.equal(mapCalls.length, 0, "Must reject row that user explicitly edited");
-	assert.equal(frm.doc.items.length, 1);
 });
 
 test("Delivery Note: rejects return DN (is_return=1) and removes native button without removing Sales Return", () => {
@@ -862,242 +718,6 @@ test("Delivery Note: rejects closed DN (status='Closed') and removes native butt
 	const buttons = frm.page.inner_buttons["Create"] || [];
 	const icBtn = buttons.find((b) => b.label === "Inter Company Purchase Receipt");
 	assert.equal(icBtn, undefined, "Inter Company Purchase Receipt button must NOT exist on closed DN");
-});
-
-test("Target safety: rejects target with batch_no set on row without item_code without mutation or RPC", () => {
-	const ctx = createFrappeEnvironment();
-	loadScriptInVm(ctx);
-
-	const frm = new ctx.FormStub("Sales Order", {
-		docstatus: 0,
-		company: "Company B",
-		customer: "Cust-A",
-		// User selected or entered batch_no on a row before setting item_code
-		items: [{ doctype: "Sales Order Item", item_code: "", batch_no: "BATCH-2026-001" }],
-	});
-
-	triggerEvent(ctx, "Sales Order", "refresh", frm);
-	frm.page.inner_buttons["Get Items From"][0].action();
-
-	const dialog = ctx.getLastDialog();
-	assert.equal(dialog, null, "Dialog must not open when target row has batch_no");
-
-	const mapCalls = ctx.calls.filter((c) => c.method?.includes("make_sales_order"));
-	assert.equal(mapCalls.length, 0, "Must not dispatch RPC when row has batch_no");
-	assert.equal(frm.doc.items.length, 1);
-	assert.equal(frm.doc.items[0].batch_no, "BATCH-2026-001", "User batch_no must be preserved");
-	assert.ok(
-		ctx.messages.some((m) => (typeof m === "string" ? m : m.message).match(/sudah berisi item/i)),
-		"User must receive notification that target is already occupied"
-	);
-});
-
-test("Target safety: rejects target with delivery_date or schedule_date set on row without item_code without mutation or RPC", () => {
-	const ctx = createFrappeEnvironment();
-	loadScriptInVm(ctx);
-
-	const frm = new ctx.FormStub("Sales Order", {
-		docstatus: 0,
-		company: "Company B",
-		customer: "Cust-A",
-		// User set schedule/delivery date on a row before setting item_code
-		items: [{ doctype: "Sales Order Item", item_code: "", delivery_date: "2026-11-05" }],
-	});
-
-	triggerEvent(ctx, "Sales Order", "refresh", frm);
-	frm.page.inner_buttons["Get Items From"][0].action();
-
-	const dialog = ctx.getLastDialog();
-	assert.equal(dialog, null, "Dialog must not open when target row has delivery_date");
-
-	const mapCalls = ctx.calls.filter((c) => c.method?.includes("make_sales_order"));
-	assert.equal(mapCalls.length, 0, "Must not dispatch RPC when row has delivery_date");
-	assert.equal(frm.doc.items.length, 1);
-	assert.equal(frm.doc.items[0].delivery_date, "2026-11-05", "User delivery_date must be preserved");
-	assert.ok(
-		ctx.messages.some((m) => (typeof m === "string" ? m : m.message).match(/sudah berisi item/i)),
-		"User must receive notification that target is already occupied"
-	);
-});
-
-test("Target safety: rejects target with negative rate set on row without item_code without mutation or RPC", () => {
-	const ctx = createFrappeEnvironment();
-	loadScriptInVm(ctx);
-
-	const frm = new ctx.FormStub("Sales Order", {
-		docstatus: 0,
-		company: "Company B",
-		customer: "Cust-A",
-		// User typed negative rate (e.g. discount or credit row)
-		items: [{ doctype: "Sales Order Item", item_code: "", rate: -15.5 }],
-	});
-
-	triggerEvent(ctx, "Sales Order", "refresh", frm);
-	frm.page.inner_buttons["Get Items From"][0].action();
-
-	const dialog = ctx.getLastDialog();
-	assert.equal(dialog, null, "Dialog must not open when target row has negative rate");
-
-	const mapCalls = ctx.calls.filter((c) => c.method?.includes("make_sales_order"));
-	assert.equal(mapCalls.length, 0, "Must not dispatch RPC when row has negative rate");
-	assert.equal(frm.doc.items.length, 1);
-	assert.equal(frm.doc.items[0].rate, -15.5, "Negative rate must be preserved");
-	assert.ok(
-		ctx.messages.some((m) => (typeof m === "string" ? m : m.message).match(/sudah berisi item/i)),
-		"User must receive notification that target is already occupied"
-	);
-});
-
-test("Target safety: rejects target with custom meaningful string field set on row without item_code without mutation or RPC", () => {
-	const ctx = createFrappeEnvironment();
-	loadScriptInVm(ctx);
-
-	const frm = new ctx.FormStub("Sales Order", {
-		docstatus: 0,
-		company: "Company B",
-		customer: "Cust-A",
-		// User entered custom note or custom field on a row before setting item_code
-		items: [{ doctype: "Sales Order Item", item_code: "", custom_po_reference: "PO-CLIENT-99" }],
-	});
-
-	triggerEvent(ctx, "Sales Order", "refresh", frm);
-	frm.page.inner_buttons["Get Items From"][0].action();
-
-	const dialog = ctx.getLastDialog();
-	assert.equal(dialog, null, "Dialog must not open when target row has custom meaningful string");
-
-	const mapCalls = ctx.calls.filter((c) => c.method?.includes("make_sales_order"));
-	assert.equal(mapCalls.length, 0, "Must not dispatch RPC when row has custom field");
-	assert.equal(frm.doc.items.length, 1);
-	assert.equal(frm.doc.items[0].custom_po_reference, "PO-CLIENT-99", "Custom field value must be preserved");
-	assert.ok(
-		ctx.messages.some((m) => (typeof m === "string" ? m : m.message).match(/sudah berisi item/i)),
-		"User must receive notification that target is already occupied"
-	);
-});
-
-test("Target safety: accepts untouched native default row with zero flags and allowed 1 defaults (qty, conversion_factor, reserve_stock)", () => {
-	const ctx = createFrappeEnvironment();
-	loadScriptInVm(ctx);
-
-	const frm = new ctx.FormStub("Sales Order", {
-		docstatus: 0,
-		name: "new-sales-order-1",
-		company: "Company B",
-		customer: "Cust-A",
-		// Native schema defaults on fresh untouched child row
-		items: [
-			{
-				doctype: "Sales Order Item",
-				name: "row-1",
-				docstatus: 0,
-				__islocal: 1,
-				__unsaved: 1,
-				idx: 1,
-				item_code: "",
-				description: "",
-				qty: 1,
-				conversion_factor: 1,
-				reserve_stock: 1,
-				is_free_item: 0,
-				delivered_by_supplier: 0,
-				page_break: 0,
-				against_blanket_order: 0,
-				grant_commission: 0,
-				stock_reserved_qty: 0,
-				is_stock_item: 0,
-				rate: 0,
-				amount: 0,
-				stock_qty: 0,
-			},
-		],
-	});
-
-	triggerEvent(ctx, "Sales Order", "refresh", frm);
-	frm.page.inner_buttons["Get Items From"][0].action();
-	const dialog = ctx.getLastDialog();
-	assert.ok(dialog, "Dialog must open when child row has only native schema defaults");
-
-	dialog.set_value("source_name", "PUR-ORD-2026-00001");
-	dialog.submit_primary();
-
-	const mapCall = ctx.calls.find((c) => c.method === "intercompany_sync.mapping.make_sales_order");
-	assert.ok(mapCall, "Mapping RPC must be dispatched for untouched native defaults");
-	const targetPayload = JSON.parse(mapCall.args.target_doc);
-	assert.equal(targetPayload.items.length, 0, "Virgin row with native defaults pruned in payload");
-	assert.equal(frm.doc.items.length, 1, "Original doc untouched before RPC response");
-});
-
-test("Target safety: accepts untouched native default row with string defaults qty:'1', conversion_factor:'1', and zero flag:'0'", () => {
-	const ctx = createFrappeEnvironment();
-	loadScriptInVm(ctx);
-
-	const frm = new ctx.FormStub("Sales Order", {
-		docstatus: 0,
-		name: "new-sales-order-1",
-		company: "Company B",
-		customer: "Cust-A",
-		// Untouched native row where schema defaults are represented as strings (common from DocType schema defaults)
-		items: [
-			{
-				doctype: "Sales Order Item",
-				name: "row-1",
-				docstatus: 0,
-				__islocal: 1,
-				__unsaved: 1,
-				idx: 1,
-				item_code: "",
-				qty: "1",
-				conversion_factor: "1",
-				reserve_stock: "1",
-				is_free_item: "0",
-				delivered_by_supplier: "0",
-				rate: "0",
-			},
-		],
-	});
-
-	triggerEvent(ctx, "Sales Order", "refresh", frm);
-	frm.page.inner_buttons["Get Items From"][0].action();
-	const dialog = ctx.getLastDialog();
-	assert.ok(dialog, "Dialog must open when child row has schema default strings '1' and '0'");
-
-	dialog.set_value("source_name", "PUR-ORD-2026-00001");
-	dialog.submit_primary();
-
-	const mapCall = ctx.calls.find((c) => c.method === "intercompany_sync.mapping.make_sales_order");
-	assert.ok(mapCall, "Mapping RPC must be dispatched for untouched default strings");
-	const targetPayload = JSON.parse(mapCall.args.target_doc);
-	assert.equal(targetPayload.items.length, 0, "Virgin row with string defaults pruned in payload");
-	assert.equal(frm.doc.items.length, 1, "Original doc untouched before RPC response");
-});
-
-test("Target safety: rejects target with arbitrary string '0' in non-numeric field like batch_no without mutation or RPC", () => {
-	const ctx = createFrappeEnvironment();
-	loadScriptInVm(ctx);
-
-	const frm = new ctx.FormStub("Sales Order", {
-		docstatus: 0,
-		company: "Company B",
-		customer: "Cust-A",
-		// User named batch_no "0" on a non-numeric field
-		items: [{ doctype: "Sales Order Item", item_code: "", batch_no: "0" }],
-	});
-
-	triggerEvent(ctx, "Sales Order", "refresh", frm);
-	frm.page.inner_buttons["Get Items From"][0].action();
-
-	const dialog = ctx.getLastDialog();
-	assert.equal(dialog, null, "Dialog must not open when target row has non-numeric batch_no '0'");
-
-	const mapCalls = ctx.calls.filter((c) => c.method?.includes("make_sales_order"));
-	assert.equal(mapCalls.length, 0, "Must not dispatch RPC when row has batch_no '0'");
-	assert.equal(frm.doc.items.length, 1);
-	assert.equal(frm.doc.items[0].batch_no, "0", "User batch_no '0' must be preserved");
-	assert.ok(
-		ctx.messages.some((m) => (typeof m === "string" ? m : m.message).match(/sudah berisi item/i)),
-		"User must receive notification that target is already occupied"
-	);
 });
 
 test("Dashboard adapter: splits comma-separated data-names into array for list route_options", () => {

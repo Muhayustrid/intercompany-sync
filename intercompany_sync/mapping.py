@@ -13,25 +13,14 @@ def _validate_target_doc(target_doc, doctype: str, source_name: str, expected_co
 	if isinstance(target_doc, str):
 		target_doc = frappe.get_doc(json.loads(target_doc))
 
-	if target_doc.get("items"):
-		frappe.throw(
-			_("Dokumen target sudah berisi item. Tidak dapat memetakan ke target yang sudah terisi."),
-			title=_("Target Tidak Kosong"),
-		)
-
+	# Get Items replaces the item table and the source link, so one target never mixes sources
 	ref_field = (
 		"inter_company_order_reference"
 		if doctype == "Sales Order"
 		else "inter_company_reference"
 	)
-	target_ref = target_doc.get(ref_field)
-	if target_ref and target_ref != source_name:
-		frappe.throw(
-			_("Dokumen target sudah terhubung ke {0}. Tidak dapat mencampur sumber inter-company.").format(
-				target_ref
-			),
-			title=_("Sumber Campuran"),
-		)
+	setattr(target_doc, "items", [])
+	setattr(target_doc, ref_field, None)
 
 	if target_doc.get("company") and target_doc.company != expected_company:
 		frappe.throw(
@@ -65,25 +54,12 @@ def _validate_target_doc(target_doc, doctype: str, source_name: str, expected_co
 				),
 				title=_("Target Bukan Draf"),
 			)
-		if persisted.get("items"):
-			frappe.throw(
-				_("Dokumen target {0} sudah berisi item di database.").format(raw_name),
-				title=_("Target Tidak Kosong"),
-			)
 		if persisted.company != expected_company:
 			frappe.throw(
 				_("Company dokumen target ({0}) tidak sesuai dengan transaksi inter-company ({1}).").format(
 					persisted.company, expected_company
 				),
 				title=_("Company Tidak Sesuai"),
-			)
-		persisted_ref = persisted.get(ref_field)
-		if persisted_ref and persisted_ref != source_name:
-			frappe.throw(
-				_("Dokumen target sudah terhubung ke {0}. Tidak dapat mencampur sumber inter-company.").format(
-					persisted_ref
-				),
-				title=_("Sumber Campuran"),
 			)
 		return raw_name
 
@@ -164,6 +140,8 @@ def make_sales_order(source_name: str, target_doc=None):
 		)
 
 	so.inter_company_order_reference = source_name
+	# Prices follow the PO; native only sets this on the buying side, so retail promos (free items) leaked in
+	so.ignore_pricing_rule = 1
 	if so.get("inter_company_invoice_reference"):
 		so.inter_company_invoice_reference = None
 
@@ -353,6 +331,8 @@ def make_purchase_receipt(source_name: str, target_doc=None):
 
 	pr.inter_company_reference = source_name
 	pr.supplier_delivery_note = source_name
+	# Prices follow the DN; native skips this for Purchase Receipt
+	pr.ignore_pricing_rule = 1
 
 	conversion_rate = flt(getattr(pr, "conversion_rate", None) or 1.0)
 	kept_items = []
@@ -447,6 +427,7 @@ def get_sources(
 	txt: str = "",
 	start: int = 0,
 	page_length: int = 20,
+	filters: dict | None = None,
 ) -> list[dict]:
 	"""Return eligible, permitted source documents using native resolver and bounded scanning."""
 	if source_doctype not in ("Purchase Order", "Delivery Note"):
@@ -456,6 +437,25 @@ def get_sources(
 		)
 
 	from erpnext.accounts.doctype.sales_invoice.sales_invoice import get_inter_company_details
+
+	def resolve(doc, doctype):
+		# The native resolver msgprints before raising; mute it so a skipped document
+		# does not surface "No Customer/Supplier found" in the picker response.
+		muted = frappe.flags.mute_messages
+		frappe.flags.mute_messages = True
+		try:
+			return get_inter_company_details(doc, doctype)
+		except (frappe.ValidationError, KeyError):
+			return None
+		finally:
+			frappe.flags.mute_messages = muted
+
+	# Extra list filters from the dialog setters/filter group: {field: value} or {field: [op, value]}
+	extra_filters = [
+		[field, *value] if isinstance(value, list | tuple) else [field, "=", value]
+		for field, value in (filters or {}).items()
+		if value not in (None, "")
+	]
 
 	start_idx = max(0, cint(start))
 	limit_len = min(max(1, cint(page_length) or 20), 100)
@@ -476,7 +476,7 @@ def get_sources(
 	offset = 0
 
 	if source_doctype == "Purchase Order":
-		filters = [["docstatus", "=", 1]]
+		filters = [["docstatus", "=", 1], *extra_filters]
 		while len(results) < needed and offset < max_scan:
 			cur_chunk = min(chunk_size, max_scan - offset)
 			batch = frappe.get_list(
@@ -517,11 +517,8 @@ def get_sources(
 			for p in batch:
 				if p.get("inter_company_order_reference") or p.name in paired_set:
 					continue
-				try:
-					details = get_inter_company_details(p, "Purchase Order")
-				except (frappe.ValidationError, KeyError):
-					continue
-				if details.get("company") != target_company:
+				details = resolve(p, "Purchase Order")
+				if not details or details.get("company") != target_company:
 					continue
 				if target_party and details.get("party") != target_party:
 					continue
@@ -531,7 +528,7 @@ def get_sources(
 					break
 
 	else:
-		filters = [["docstatus", "=", 1], ["is_return", "=", 0]]
+		filters = [["docstatus", "=", 1], ["is_return", "=", 0], *extra_filters]
 		while len(results) < needed and offset < max_scan:
 			cur_chunk = min(chunk_size, max_scan - offset)
 			batch = frappe.get_list(
@@ -557,11 +554,8 @@ def get_sources(
 
 			offset += len(batch)
 			for d in batch:
-				try:
-					details = get_inter_company_details(d, "Delivery Note")
-				except (frappe.ValidationError, KeyError):
-					continue
-				if details.get("company") != target_company:
+				details = resolve(d, "Delivery Note")
+				if not details or details.get("company") != target_company:
 					continue
 				if target_party and details.get("party") != target_party:
 					continue
@@ -579,3 +573,22 @@ def get_sources(
 		)
 
 	return results[start_idx : start_idx + limit_len]
+
+
+@frappe.whitelist()
+def search_sources(doctype, txt, searchfield=None, start=0, page_len=20, filters=None, as_dict=False):
+	"""Custom query for the native MultiSelectDialog (frappe.desk.search.search_widget contract)."""
+	filters = dict(frappe.parse_json(filters) or {})
+	target_company = filters.pop("target_company", None)
+	target_party = filters.pop("target_party", None)
+	if not target_company:
+		return []
+	return get_sources(
+		source_doctype=doctype,
+		target_company=target_company,
+		target_party=target_party,
+		txt=txt or "",
+		start=start,
+		page_length=page_len,
+		filters=filters,
+	)
