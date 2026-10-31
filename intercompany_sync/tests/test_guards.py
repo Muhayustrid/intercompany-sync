@@ -102,3 +102,22 @@ class TestGuards(IntegrationTestCase):
 		si_return.submit()
 		self.assertEqual(si_return.docstatus, 1)
 		self.assertEqual(si_return.is_return, 1)
+
+	def test_pr_overreceipt_blocked(self):
+		dn = make_dn(qty=10)
+		pr1 = make_inter_company_purchase_receipt(dn.name)
+		for item in pr1.items:
+			if not item.warehouse:
+				item.warehouse = f"Stores - {ICO_ABBR}"
+			item.qty = 6
+		pr1.insert()
+		pr1.submit()
+		self.assertEqual(pr1.docstatus, 1)
+
+		pr2 = make_inter_company_purchase_receipt(dn.name)
+		for item in pr2.items:
+			if not item.warehouse:
+				item.warehouse = f"Stores - {ICO_ABBR}"
+			item.qty = 6
+		pr2.insert()
+		self.assertRaises(frappe.ValidationError, pr2.submit)

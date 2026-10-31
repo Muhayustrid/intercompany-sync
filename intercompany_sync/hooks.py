@@ -16,11 +16,23 @@ fixtures = [
 
 doctype_js = {
 	"Sales Invoice": "public/js/sales_invoice.js",
+	"Sales Order": "public/js/intercompany_documents.js",
+	"Purchase Order": "public/js/intercompany_documents.js",
+	"Delivery Note": "public/js/intercompany_documents.js",
+	"Purchase Receipt": "public/js/intercompany_documents.js",
+}
+
+override_doctype_dashboards = {
+	"Purchase Order": "intercompany_sync.connections.purchase_order",
+	"Sales Order": "intercompany_sync.connections.sales_order",
+	"Delivery Note": "intercompany_sync.connections.delivery_note",
+	"Purchase Receipt": "intercompany_sync.connections.purchase_receipt",
 }
 
 doc_events = {
 	"Purchase Receipt": {
 		"validate": "intercompany_sync.guards.validate_purchase_receipt",
+		"before_submit": "intercompany_sync.guards.before_submit_purchase_receipt",
 	},
 	"Delivery Note": {
 		"before_cancel": "intercompany_sync.guards.validate_delivery_note_cancel",
