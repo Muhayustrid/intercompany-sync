@@ -16,8 +16,14 @@ fixtures = [
 
 doctype_js = {
 	"Sales Invoice": "public/js/sales_invoice.js",
-	"Sales Order": "public/js/intercompany_documents.js",
-	"Purchase Order": "public/js/intercompany_documents.js",
+	"Sales Order": [
+		"public/js/intercompany_documents.js",
+		"public/js/order_update_pricing.js",
+	],
+	"Purchase Order": [
+		"public/js/intercompany_documents.js",
+		"public/js/order_update_pricing.js",
+	],
 	"Delivery Note": "public/js/intercompany_documents.js",
 	"Purchase Receipt": "public/js/intercompany_documents.js",
 }

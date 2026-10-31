@@ -10,13 +10,19 @@ class TestHooks(unittest.TestCase):
 		"""Test doctype_js includes SO, PO, DN, PR pointing to shared intercompany_documents.js."""
 		expected_path = "public/js/intercompany_documents.js"
 		self.assertIn("Sales Order", hooks.doctype_js)
-		self.assertEqual(hooks.doctype_js["Sales Order"], expected_path)
+		self.assertIn(expected_path, hooks.doctype_js["Sales Order"])
 		self.assertIn("Purchase Order", hooks.doctype_js)
-		self.assertEqual(hooks.doctype_js["Purchase Order"], expected_path)
+		self.assertIn(expected_path, hooks.doctype_js["Purchase Order"])
 		self.assertIn("Delivery Note", hooks.doctype_js)
 		self.assertEqual(hooks.doctype_js["Delivery Note"], expected_path)
 		self.assertIn("Purchase Receipt", hooks.doctype_js)
 		self.assertEqual(hooks.doctype_js["Purchase Receipt"], expected_path)
+
+	def test_doctype_js_contains_order_update_pricing_for_so_and_po(self):
+		"""Test doctype_js includes order_update_pricing.js for Sales Order and Purchase Order."""
+		expected_path = "public/js/order_update_pricing.js"
+		self.assertIn(expected_path, hooks.doctype_js["Sales Order"])
+		self.assertIn(expected_path, hooks.doctype_js["Purchase Order"])
 
 	def test_doctype_js_preserves_existing_sales_invoice(self):
 		"""Test existing Sales Invoice entry in doctype_js is preserved."""
